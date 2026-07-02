@@ -14,7 +14,7 @@
 | 5 | MultiJail | `DAMO-NLP-SG/MultiJail` | train | 315 | `raw/multijail/multijail_train.jsonl` | 2026-07-02 | 공식 원본. 9개 언어 병렬. en 컬럼만 사용(→1). source 컬럼 있음(중복 제거용) |
 | 6 | Anthropic hh-rlhf | `Anthropic/hh-rlhf` (helpful-base) | train / test | 43835 / 2354 | `raw/hh_rlhf/hh_rlhf_helpful_base_{train,test}.jsonl` | 2026-07-02 | helpful-base 서브셋만(harmless/red-team 제외). chosen/rejected는 답변만 다름 |
 
-## 정제 단계로 넘길 메모 (오늘 처리 안 함)
+## 정제 단계로 넘길 메모
 
 - **prompts.chat**
   - `type` 필터: `TEXT`만 사용, `STRUCTURED`·`IMAGE` 제외 검토
@@ -34,8 +34,3 @@
 - **MultiJail**
   - `en` 컬럼만 사용(→ label 1). 나머지 언어 컬럼은 버림(영어 단일 모델)
   - en 315개 중 ~300개가 Anthropic red-team 출신 → AdvBench/JBB/hh-rlhf와 `source` 컬럼으로 중복 교차 확인
-- **hh-rlhf (helpful-base)**
-  - chosen 또는 rejected 아무거나에서 `Human:` 뒤 질문만 추출(둘의 질문은 동일) → label 0
-  - 대화 형식 껍데기(`\n\nHuman:`, `\n\nAssistant:`) 제거 필요
-  - 정상 과다 → 목표 3,000~5,000개로 다운샘플 예정
-  - 첫 Human 질문만? 아니면 멀티턴 전체? 정제 단계에서 결정(첫 질문만 쓰는 게 단순)
