@@ -37,6 +37,9 @@ import statistics as st
 from pathlib import Path
 from collections import defaultdict, Counter
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import obfuscate as OBF
+
 BASE = Path(__file__).resolve().parent.parent
 FINAL = BASE / "processed" / "combined_final.jsonl"
 BALANCED = BASE / "processed" / "balanced.jsonl"
@@ -48,6 +51,9 @@ DATASET = "Mindgard/evaded-prompt-injection-and-jailbreak-samples"
 SEED = 42
 TECH_PER_ORIGIN = 3          # 원본당 넣을 기법 수 (3 → 공격 ~1,800)
 NEAR_DUP = 0.9               # 정상 근사중복 제거 임계
+NORMAL_OBF_FRAC = 1.0        # 평가셋 정상 중 난독화할 비율(1.0=전부). 공격이 100% 난독화라
+                             # 정상도 전부 난독화해야 '난독화 유무'가 라벨 신호가 안 됨.
+OBF_TECHS = OBF.ACTIVE_TECHNIQUES   # 학습 증강과 동일 5기법 (obfuscate.py 공유)
 BINS = [(0, 60), (60, 120), (120, 200), (200, 300), (300, 600), (600, 10**9)]
 
 
@@ -225,35 +231,75 @@ def main():
         rng.shuffle(rows)
         final_atk.extend(rows[:keep])
 
+    # 정상 난독화: 학습과 동일한 5기법으로 정상을 난독화(대칭). 공격이 100% 난독화이므로
+    # 정상도 전부(기본) 난독화해야 '난독화 유무'가 라벨 신호가 되지 않는다.
+    rng.shuffle(normals)
+    n_obf = int(round(len(normals) * NORMAL_OBF_FRAC))
+    techs = OBF.assign_balanced(n_obf, rng, OBF_TECHS)
+    norm_tech_dist = Counter()
+
     # 조립
     out = []
     for i, (o, a, t) in enumerate(final_atk):
         out.append({"id": f"mindgard_{i:05d}", "text": t, "label": 1,
                     "source": "mindgard", "split": "eval", "attack_type": None,
-                    "is_augmented": 0, "attack_name": a, "char_len": len(t)})
-    for r in normals:
-        out.append({"id": r["id"], "text": r["text"], "label": 0,
+                    "is_augmented": 0, "attack_name": a, "is_obfuscated": 1,
+                    "char_len": len(t)})
+    for idx, r in enumerate(normals):
+        if idx < n_obf:
+            tech = techs[idx]
+            text = OBF.obfuscate(r["text"], tech, rng)
+            if text == r["text"]:        # 변형 실패 시 대체 기법
+                for t2 in OBF_TECHS:
+                    alt = OBF.obfuscate(r["text"], t2, rng)
+                    if alt != r["text"]:
+                        text, tech = alt, t2
+                        break
+            norm_tech_dist[tech] += 1
+            is_obf = 1
+        else:
+            text, is_obf = r["text"], 0
+        out.append({"id": r["id"], "text": text, "label": 0,
                     "source": r["source"], "split": "eval", "attack_type": None,
-                    "is_augmented": 0, "attack_name": None, "char_len": len(r["text"])})
+                    "is_augmented": 0, "attack_name": None, "is_obfuscated": is_obf,
+                    "char_len": len(text)})
 
     OUTDIR.mkdir(parents=True, exist_ok=True)
     with open(OUT, "w", encoding="utf-8") as f:
         for r in out:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    write_report(out, final_atk, normals, tech_dist, bin_report, atk_leak, len(leftover))
-    print(f"[완료] {OUT}  (공격 {len(final_atk)} / 정상 {len(normals)})")
+    write_report(out, final_atk, normals, tech_dist, bin_report, atk_leak,
+                 len(leftover), n_obf, norm_tech_dist)
+    print(f"[완료] {OUT}  (공격 {len(final_atk)} / 정상 {len(normals)}, 정상난독화 {n_obf})")
     print(f"[완료] {REPORT}")
 
 
-def write_report(out, atk, normals, tech_dist, bin_report, atk_leak, leftover_n):
+def write_report(out, atk, normals, tech_dist, bin_report, atk_leak, leftover_n,
+                 n_obf, norm_tech_dist):
     la = [r["char_len"] for r in out if r["label"] == 1]
     ln = [r["char_len"] for r in out if r["label"] == 0]
+
+    # 난독화 지름길 지표
+    def nonascii(t):
+        return any(ord(c) > 127 for c in t)
+    na_rows = [r for r in out if nonascii(r["text"])]
+    na_p = (sum(1 for r in na_rows if r["label"] == 1) / len(na_rows)) if na_rows else 0
+    obf_rows = [r for r in out if r.get("is_obfuscated") == 1]
+    obf_p = (sum(1 for r in obf_rows if r["label"] == 1) / len(obf_rows)) if obf_rows else 0
+
     L = []
     L.append("# 난독화 평가셋(시험지) 빌드 리포트 (task 5)\n\n")
     L.append(f"- 총 {len(out)}개 (공격 {len(atk)} / 정상 {len(normals)}), 1:1\n")
     L.append(f"- 출처: 공격=Mindgard(원본×기법균형) / 정상=잔여풀 {leftover_n}개에서 길이매칭\n")
     L.append(f"- 공격 오염 재확인(original이 train에 있음): **{atk_leak}개** (기대 0)\n")
+    L.append(f"- 정상 난독화: {n_obf}/{len(normals)}개 (학습과 동일 5기법)\n")
+
+    L.append("\n## 난독화 지름길 점검 (평가셋)\n\n")
+    L.append(f"- 난독화(is_obfuscated=1)된 행의 공격 비율: **{obf_p*100:.1f}%** "
+             "(공격·정상 모두 난독화면 50% → '난독화=공격' 지름길 없음)\n")
+    L.append(f"- 비ASCII 문자 포함 행의 공격 비율: **{na_p*100:.1f}%** "
+             "(50%에 가까울수록 '이상한 문자=공격' 지름길 약함)\n")
 
     L.append("\n## 길이 매칭 (공격 vs 정상)\n\n")
     L.append(f"- 공격 길이 중앙값 {int(st.median(la))} / 정상 중앙값 {int(st.median(ln))}\n")
@@ -263,9 +309,14 @@ def write_report(out, atk, normals, tech_dist, bin_report, atk_leak, leftover_n)
             need, got, dropped, pool = bin_report[b]
             L.append(f"| {b[0]}-{b[1] if b[1]<10**9 else '∞'} | {need} | {got} | {dropped} | {pool} |\n")
 
-    L.append("\n## 공격 기법 분포 (20기법 골고루 확인)\n\n")
+    L.append("\n## 공격 기법 분포 (Mindgard, 골고루 확인)\n\n")
     L.append("| attack_name | 개수 |\n|---|---|\n")
     for a, c in sorted(tech_dist.items()):
+        L.append(f"| {a} | {c} |\n")
+
+    L.append("\n## 정상 난독화 기법 분포 (학습과 동일 5기법)\n\n")
+    L.append("| 기법 | 개수 |\n|---|---|\n")
+    for a, c in sorted(norm_tech_dist.items()):
         L.append(f"| {a} | {c} |\n")
 
     L.append("\n## 한계 (일지)\n")
