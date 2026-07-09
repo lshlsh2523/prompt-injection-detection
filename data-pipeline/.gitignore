@@ -3,3 +3,4 @@ raw/
 __pycache__/
 *.pyc
 .hf_cache/
+eval/obfuscated_eval.jsonl
